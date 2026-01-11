@@ -12,19 +12,15 @@ import io
 import telebot
 from telebot import apihelper, types
 
-# Загрузка переменных окружения
 load_dotenv()
 
-# --- КОНФИГУРАЦИЯ ---
 API_TOKEN = os.getenv('API_TOKEN')
 DB_NAME = "results.db"
-# Получаем список админов из .env
 try:
     ADMIN_IDS = [int(id_str) for id_str in os.getenv('ADMIN_IDS', '').split(',') if id_str.strip()]
 except:
     ADMIN_IDS = []
 
-# Настройки AI Tunnel (Используется ТОЛЬКО для C4)
 AI_API_URL = os.getenv('AI_API_URL')
 AI_API_KEY = os.getenv('AI_API_KEY')
 AI_MODEL = os.getenv('AI_MODEL')
@@ -34,7 +30,6 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 
-# Состояния пользователя
 STATE_IDLE = "idle"
 STATE_C4_PROCESS = "c4_answering"
 STATE_WAIT_FIO = "wait_fio"
@@ -43,7 +38,6 @@ STATE_WAIT_FIO = "wait_fio"
 class UserSession:
     state: str = STATE_IDLE
     
-    # Данные для C1
     c1_data: Dict[str, Any] = field(
         default_factory=lambda: {
             'm1_answers': set(), 
@@ -51,15 +45,13 @@ class UserSession:
             'm3_answers': set()
         }
     )
-    # Данные для C2
     c2_data: Dict[str, Any] = field(
         default_factory=lambda: {
             'm4_idx': 0, 'm4_score': 0, 'm4_temp': set(), 'm4_answers': [],
             'm5_answers': set(), 
-            'm6_idx': 0, 'm6_answers': []
+            'm6_idx': 0, 'm6_answers': [], 'm6_score': 0
         }
     )
-    # Данные для C3
     c3_data: Dict[str, Any] = field(
         default_factory=lambda: {
             'm7_idx': 0, 'm7_answers': [],
@@ -67,11 +59,10 @@ class UserSession:
             'm10_idx': 0, 'm10_answers': []
         }
     )
-    # Данные для C4 (Свободный ввод)
     c4_data: Dict[str, Any] = field(
         default_factory=lambda: {
             'current_q_idx': 0,
-            'user_answers': []  # Список кортежей (Вопрос, Ответ пользователя)
+            'user_answers': []
         }
     )
 
@@ -81,8 +72,24 @@ class ContentProvider:
         2: "Частично-поисковый (Средний)",
         3: "Творчески-исследовательский (Высокий)"
     }
+    FULL_DESCRIPTIONS = {
+        'c1': {
+            1: "Вы не проявляете интерес к познанию педагогических явлений и овладению средствами научного познания. Исследовательская деятельность не является для Вас ценностью.",
+            2: "Вы проявляете частичный интерес к познанию педагогических явлений. Вы понимаете значимость исследовательской деятельности, но не всегда готовы заниматься ею систематически.",
+            3: "Вам свойственен устойчивый интерес к познанию педагогических явлений. Исследовательская деятельность является для Вас одной из приоритетных ценностей, способствующей профессиональному росту."
+        },
+        'c2': {
+            1: "Ваши методологические знания фрагментарны. Вы слабо владеете методами научного познания и испытываете затруднения в их применении на практике.",
+            2: "Вы владеете основными понятиями методологии педагогического исследования. Вы способны применять отдельные методы научного познания, но испытываете трудности в системном проектировании исследования.",
+            3: "Ваши методологические знания носят системный характер; вы уверенно используете методы научного познания для решения профессиональных задач и проектирования педагогического процесса."
+        },
+        'c3': {
+            1: "Вы строите свою деятельность по заранее отработанной схеме, не проявляя творчества. Вы предпочитаете действовать по образцу и избегаете инноваций.",
+            2: "Вы демонстрируете стремление усовершенствовать собственную педагогическую практику. Вы открыты новому, но внедряете инновации осторожно.",
+            3: "Вы демонстрируете высокую творческую активность и инициативность. Вы постоянно стремитесь к саморазвитию, создаете авторские продукты и активно внедряете инновации."
+        }
+    }
 
-    # --- ТЕКСТЫ ИЗ ФАЙЛА ВСТУПЛЕНИЯ ---
     INTRO_TEXT = (
         "Здравствуйте, коллега! 👋\n"
         "Рады видеть вас в чат-боте для диагностики вашей <b>исследовательской культуры</b>.\n\n"
@@ -122,24 +129,23 @@ class ContentProvider:
     }
 
     METHODOLOGY_INSTRUCTIONS = {
-        'm1': "<b>Методика 1.</b> Анкета по выявлению ценностного отношения.\nЗадание: определите важные для Вас ценности, отметьте все подходящие ответы.",
-        'm2': "<b>Методика 2.</b> Тест «Рефлексия на саморазвитие».\nЗадание: ответьте на вопросы, выбирая только один из предложенных вариантов ответа.",
-        'm3': "<b>Методика 3.</b> Анкета «Мотивационная готовность».\nЗадание: выберите не более трех ответов на вопрос: что вас побуждает интересоваться инновациями?",
-        'm4': "<b>Методика 4 (Тест C4 из файла, в коде это M4).</b> Метод незаконченных предложений.\nЗадание: быстро завершите каждое предложение (не более 5 слов).", # Это для C4, но C4 у нас отдельно идет
+        'text_m1': "<b>Методика 1.</b> Анкета по выявлению у педагога ценностного отношения к исследовательской педагогической деятельности.\n\n<b>Задание:</b> определите важные для Вас ценности, отметьте все подходящие ответы.",
+        'text_m2': "<b>Методика 2.</b> Тест «Рефлексия на саморазвитие».\n\n<b>Задание:</b> ответьте на вопросы, выбирая только один из предложенных вариантов ответа.",
+        'text_m3': "<b>Методика 3.</b> Анкета «Мотивационная готовность педагога к освоению новшеств».\n\n<b>Задание:</b> выберите не более трех ответов на вопрос: что вас побуждает интересоваться инновациями и применять новшества?",
         
-        # Mapping for actual code structure
-        'c2_intro_m5': "<b>Методика 5.</b> Тест «Знание методологии педагогического исследования».\nЗадание: ответьте на вопросы. Некоторые вопросы предполагают выбор нескольких вариантов.",
-        'c2_intro_m6': "<b>Методика 6.</b> Анкета на выявление уровня сформированности умений.\nЗадание: выберите все умения, которые необходимы педагогу-исследователю.",
-        'c2_intro_m7': "<b>Методика 7.</b> Решение педагогических задач (кейсы).\nЗадание: выберите один вариант решения предложенной задачи.",
+        'text_m4': "<b>Методика 4.</b> Метод незаконченных предложений.\n\n<b>Задание:</b> быстро и без долгих раздумий завершите каждое предложение, исходя из своих первых ассоциаций и убеждений. Ответ напечатайте в окно (не более 5 слов).", # Это C4
         
-        'c3_intro_m8': "<b>Методика 8.</b> Тест «Какой Ваш творческий потенциал?».\nЗадание: выберите один из предложенных вариантов ответа.",
-        'c3_intro_m9': "<b>Методика 9.</b> Анкета «Восприимчивость к новшествам».\nЗадание: выберите один из предложенных вариантов ответа.", # В коде это m8
-        'c3_intro_m10': "<b>Методика 10.</b> Анкета стремления к самосовершенствованию.\nЗадание: выберите один из предложенных вариантов ответа."
+        'text_m5': "<b>Методика 5.</b> Тест «Знание методологии педагогического исследования».\n\n<b>Задание:</b> ответьте на вопросы, выбирая только один из предложенных вариантов ответа.\nВопросы 2, 6, 7 предполагают выбор нескольких вариантов ответов.",
+        'text_m6': "<b>Методика 6.</b> Анкета на выявление уровня сформированности умений педагога-исследователя.\n\n<b>Задание:</b> выберите все умения, которые необходимы педагогу-исследователю, на ваш взгляд.",
+        'text_m7': "<b>Методика 7.</b> Решение педагогических задач.\n\n<b>Задание:</b> выберите один вариант решения предложенной педагогической задачи.",
+        
+        'text_m8': "<b>Методика 8.</b> Тест «Какой Ваш творческий потенциал?».\n\n<b>Задание:</b> выберите один из предложенных вариантов ответа.",
+        'text_m9': "<b>Методика 9.</b> Анкета «Восприимчивость педагогов к новшествам».\n\n<b>Задание:</b> выберите один из предложенных вариантов ответа.",
+        'text_m10': "<b>Методика 10.</b> Анкета по выявлению у педагога стремления к самосовершенствованию.\n\n<b>Задание:</b> выберите один из предложенных вариантов ответа."
     }
 
-    # --- РЕКОМЕНДАЦИИ ИЗ ФАЙЛА (ДЛЯ ОБЩЕГО ВЫВОДА) ---
     GLOBAL_RECOMMENDATIONS = {
-        1: ( # РЕПРОДУКТИВНЫЙ
+        1: (
             "<b>Ваш уровень — РЕПРОДУКТИВНЫЙ (Начальный)</b>\n\n"
             "<b>Рекомендации:</b>\n"
             "1. Начните с малого. Посетите семинар или дискуссию на тему «Зачем учителю исследовать?». "
@@ -149,7 +155,7 @@ class ContentProvider:
             "3. Подключитесь к профессиональному сообществу в роли наблюдателя. Найдите наставника.\n"
             "4. Начните формировать портфолио с краткого рефлексивного эссе."
         ),
-        2: ( # ЧАСТИЧНО-ПОИСКОВЫЙ
+        2: (
             "<b>Ваш уровень — ЧАСТИЧНО-ПОИСКОВЫЙ (Средний)</b>\n\n"
             "<b>Рекомендации:</b>\n"
             "1. Переходите от наблюдения к участию. Примите участие в пед. дебатах, аргументируя данными.\n"
@@ -158,7 +164,7 @@ class ContentProvider:
             "Рассмотрите соавторство.\n"
             "4. Используйте методы формирующего оценивания. Регулярно дополняйте портфолио."
         ),
-        3: ( # ТВОРЧЕСКИ-ИССЛЕДОВАТЕЛЬСКИЙ
+        3: (
             "<b>Ваш уровень — ТВОРЧЕСКИ-ИССЛЕДОВАТЕЛЬСКИЙ (Высокий)</b>\n\n"
             "<b>Рекомендации:</b>\n"
             "1. Сформулируйте и транслируйте свою педагогическую концепцию. Выступайте в роли «носителя культуры».\n"
@@ -169,7 +175,6 @@ class ContentProvider:
         )
     }
 
-    # --- ДАННЫЕ ДЛЯ C1 ---
     M1_ITEMS = {1:1, 2:1, 3:1, 4:0, 5:1, 6:1, 7:1, 8:0, 9:0, 10:0, 11:1}
     M1_TEXTS = {
         1: "Потребность в изменении окружающей пед. действительности", 2: "Совершенствование практики",
@@ -206,7 +211,6 @@ class ContentProvider:
         12: "Материальные причины", 13: "Стремление быть оцененным"
     }
 
-    # --- ДАННЫЕ ДЛЯ C2 ---
     M4_QS = [
         {"t": "s", "q": "Педагогическое исследование для Вас – это:", "o": [("Эксперименты", 0), ("Новые знания", 1), ("Системный процесс", 2)]},
         {"t": "m", "q": "Компоненты научного исследования:", "o": ["Методы", "Задачи", "Продукт", "Ресурсы", "Объект", "Критерии", "Предмет", "Планирование", "Гипотеза"], "c": {0, 1, 4, 6, 7, 8}, "w": 0.5},
@@ -235,7 +239,6 @@ class ContentProvider:
         ("Дети не понимают сущности управления проектами:", [("Анализ причин", 1), ("Соотнести опыт", 2), ("Обсудить с сообществом", 3)])
     ]
 
-    # --- ДАННЫЕ ДЛЯ C3 ---
     GENERIC_TESTS = {
         'm7': [
             ("Мир может быть улучшен:", [("Да", 3), ("Нет", 1), ("Кое в чем", 2)]),
@@ -278,7 +281,6 @@ class ContentProvider:
         ]
     }
 
-    # --- ДАННЫЕ ДЛЯ C4 (Свободный ввод) ---
     C4_PROMPTS = [
         "Для меня педагогическое исследование – это…",
         "Знание методологии педагогического исследования необходимо, чтобы…",
@@ -309,7 +311,6 @@ class DatabaseManager:
                     total_res TEXT
                 )
             ''')
-            # Миграции для старых БД
             try:
                 conn.execute("ALTER TABLE results ADD COLUMN c1_level INTEGER")
                 conn.execute("ALTER TABLE results ADD COLUMN c2_level INTEGER")
@@ -401,13 +402,8 @@ class QuizBot:
         if score <= med_max: return 2
         return 3
 
-    # --- AI ФУНКЦИИ (ТОЛЬКО C4) ---
     
     def _get_ai_c4_analysis(self, qa_list: List[Tuple[str, str]]) -> Tuple[str, float, int]:
-        """
-        ИИ анализирует ответы C4.
-        Возвращает: (Текст вывода, Суммарный балл, Уровень)
-        """
         qa_text = "\n".join([f"Вопрос: {q}\nОтвет: {a}" for q, a in qa_list])
         
         system_prompt = (
@@ -439,7 +435,6 @@ class QuizBot:
             data = response.json()
             content = data['choices'][0]['message']['content']
             
-            # Очистка от markdown блоков json
             cleaned = re.sub(r'```json\s*|\s*```', '', content).strip()
             parsed = json.loads(cleaned)
             
@@ -447,10 +442,8 @@ class QuizBot:
             
         except Exception as e:
             logging.error(f"AI C4 Error: {e}")
-            # Fallback
             return "Не удалось провести автоматический анализ. Ответы сохранены.", 0, 1
 
-    # --- HANDLERS ---
 
     def _register_handlers(self):
         self.bot.message_handler(commands=['start'])(self.handle_start)
@@ -458,14 +451,12 @@ class QuizBot:
         self.bot.callback_query_handler(func=lambda c: c.data == "my_results")(self.handle_show_results)
         self.bot.callback_query_handler(func=lambda c: c.data == "global_result")(self.handle_global_result)
         
-        # Admin
         self.bot.message_handler(commands=['admin'])(self.handle_admin)
         self.bot.callback_query_handler(func=lambda c: c.data == "admin_export")(self.handle_export)
 
-        # Текстовый обработчик (ФИО и C4)
+
         self.bot.message_handler(content_types=['text'])(self.handle_text_input)
 
-        # C1
         self.bot.callback_query_handler(func=lambda c: c.data == "c1_start")(self.c1_intro)
         self.bot.callback_query_handler(func=lambda c: c.data == "c1_real_start")(self.c1_start_test)
         self.bot.callback_query_handler(func=lambda c: c.data.startswith("c1_m1_"))(self.c1_m1_handler)
@@ -473,19 +464,17 @@ class QuizBot:
         self.bot.callback_query_handler(func=lambda c: c.data.startswith("c1_m3_"))(self.c1_m3_handler)
         self.bot.callback_query_handler(func=lambda c: c.data == "c1_done")(self.c1_finish)
         
-        # C2
         self.bot.callback_query_handler(func=lambda c: c.data == "c2_start")(self.c2_intro)
         self.bot.callback_query_handler(func=lambda c: c.data == "c2_real_start")(self.c2_start_test)
         self.bot.callback_query_handler(func=lambda c: c.data.startswith("c2_m4_"))(self.c2_m4_handler)
         self.bot.callback_query_handler(func=lambda c: c.data.startswith("c2_m5_"))(self.c2_m5_handler)
         self.bot.callback_query_handler(func=lambda c: c.data.startswith("c2_m6_"))(self.c2_m6_handler)
         
-        # C3
+
         self.bot.callback_query_handler(func=lambda c: c.data == "c3_start")(self.c3_intro)
         self.bot.callback_query_handler(func=lambda c: c.data == "c3_real_start")(self.c3_start_test)
         self.bot.callback_query_handler(func=lambda c: c.data.startswith("c3_seq_"))(self.c3_seq_handler)
         
-        # C4 (Старт)
         self.bot.callback_query_handler(func=lambda c: c.data == "c4_start")(self.c4_intro)
         self.bot.callback_query_handler(func=lambda c: c.data == "c4_real_start")(self.c4_start_test)
 
@@ -493,7 +482,6 @@ class QuizBot:
         chat_id = message.chat.id
         fio = self.db.get_fio(chat_id)
         
-        # Сначала показываем приветствие из файла
         self.bot.send_message(chat_id, self.content.INTRO_TEXT, parse_mode="HTML")
         
         if not fio:
@@ -510,7 +498,6 @@ class QuizBot:
         self.show_menu(call.message.chat.id)
 
     def show_menu(self, chat_id: int):
-        # Проверка ФИО еще раз (на случай сбоев)
         fio = self.db.get_fio(chat_id)
         if not fio:
             self.bot.send_message(chat_id, "Введите ФИО, чтобы получить доступ к меню.")
@@ -546,12 +533,10 @@ class QuizBot:
         kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("Меню", callback_data="menu"))
         self.bot.send_message(call.message.chat.id, "Вернуться в меню:", reply_markup=kb)
 
-    # --- C4 LOGIC (FREE TEXT + AI) ---
     def c4_intro(self, call: types.CallbackQuery):
         if self.db.get_results(call.message.chat.id).get('c4_res'):
              return self.bot.answer_callback_query(call.id, "Уже пройдено!")
         
-        # Показываем интро для C4
         kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("Начать тест", callback_data="c4_real_start"))
         self._safe_edit(call.message.chat.id, call.message.message_id, self.content.CRITERIA_INTROS['c4'], reply_markup=kb)
 
@@ -561,8 +546,7 @@ class QuizBot:
         session.state = STATE_C4_PROCESS
         session.c4_data = {'current_q_idx': 0, 'user_answers': []}
         
-        # Инструкция из методички
-        self.bot.send_message(chat_id, self.content.METHODOLOGY_INSTRUCTIONS['m4'], parse_mode="HTML")
+        self.bot.send_message(chat_id, self.content.METHODOLOGY_INSTRUCTIONS['text_m4'], parse_mode="HTML")
         self._send_next_c4_question(chat_id)
 
     def _send_next_c4_question(self, chat_id: int):
@@ -570,7 +554,6 @@ class QuizBot:
         idx = session.c4_data['current_q_idx']
         
         if idx >= len(self.content.C4_PROMPTS):
-            # Все вопросы заданы, отправляем на анализ ИИ (ТОЛЬКО ЭТОТ ЭТАП)
             self.bot.send_message(chat_id, "⏳ Спасибо! Ваши ответы приняты. ИИ анализирует результаты...")
             
             ai_text, score, level = self._get_ai_c4_analysis(session.c4_data['user_answers'])
@@ -607,25 +590,21 @@ class QuizBot:
             self.show_menu(chat_id)
             
         elif session.state == STATE_C4_PROCESS:
-            # Сохраняем ответ
             idx = session.c4_data['current_q_idx']
             question = self.content.C4_PROMPTS[idx]
             answer = message.text
             session.c4_data['user_answers'].append((question, answer))
             
-            # Переходим к следующему
             session.c4_data['current_q_idx'] += 1
             self._send_next_c4_question(chat_id)
         else:
-            # Игнорируем или перенаправляем в меню
             pass
 
-    # --- GLOBAL RESULT (STATIC FILE LOGIC) ---
     def handle_global_result(self, call: types.CallbackQuery):
         chat_id = call.message.chat.id
         res = self.db.get_results(chat_id)
         
-        # Проверяем, что все тесты пройдены
+
         if not all([res.get('c1_res'), res.get('c2_res'), res.get('c3_res'), res.get('c4_res')]):
             self.bot.answer_callback_query(call.id, "Сначала пройдите все 4 критерия!", show_alert=True)
             return
@@ -637,9 +616,7 @@ class QuizBot:
         l3 = res.get('c3_level', 0)
         l4 = res.get('c4_level', 0)
         
-        # Расчет среднего уровня (округляем до ближайшего целого)
         avg_level_float = (l1 + l2 + l3 + l4) / 4.0
-        # Простая логика округления: <1.5 -> 1, <2.5 -> 2, иначе 3
         if avg_level_float < 1.5:
             final_level_id = 1
         elif avg_level_float < 2.5:
@@ -647,7 +624,6 @@ class QuizBot:
         else:
             final_level_id = 3
             
-        # Берем текст из статических рекомендаций (файл)
         recommendation_text = self.content.GLOBAL_RECOMMENDATIONS.get(final_level_id, "Нет рекомендаций")
         
         total_score = (res.get('c1_score') or 0) + (res.get('c2_score') or 0) + (res.get('c3_score') or 0) + (res.get('c4_score') or 0)
@@ -662,7 +638,6 @@ class QuizBot:
         kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("Меню", callback_data="menu"))
         self.bot.send_message(chat_id, text, reply_markup=kb, parse_mode="HTML")
 
-    # --- ADMIN HANDLERS ---
     def handle_admin(self, message: types.Message):
         if message.from_user.id not in ADMIN_IDS:
             return 
@@ -689,29 +664,21 @@ class QuizBot:
             try: return json.loads(row[col]) if row[col] else {}
             except: return {}
 
-        # Формируем заголовки. 
-        # Нам нужны ФИО + Баллы за КАЖДЫЙ ответ
         headers = ["User ID", "ФИО"]
         
-        # C1 Headers
+
         headers.extend(["C1 Total Score", "C1 Level"])
-        headers.extend([f"C1 M1 Q{i+1}" for i in range(11)]) # M1 имеет 11 пунктов
-        headers.extend([f"C1 M2 Q{i+1}" for i in range(18)]) # M2 имеет 18 вопросов
-        headers.extend([f"C1 M3 Q{i+1}" for i in range(13)]) # M3 имеет 13 пунктов
-        
-        # C2 Headers
+        headers.extend([f"C1 M1 Q{i+1}" for i in range(11)])
+        headers.extend([f"C1 M2 Q{i+1}" for i in range(18)]) 
+        headers.extend([f"C1 M3 Q{i+1}" for i in range(13)]) 
         headers.extend(["C2 Total Score", "C2 Level"])
-        headers.extend([f"C2 M4 Q{i+1} (Score)" for i in range(7)]) # M4 - 7 вопросов (здесь мы сохраняли score за вопрос)
-        headers.extend([f"C2 M5 Q{i+1}" for i in range(13)]) # M5 - 13 пунктов
-        headers.extend([f"C2 M6 Q{i+1}" for i in range(8)]) # M6 - 8 вопросов
-        
-        # C3 Headers
+        headers.extend([f"C2 M4 Q{i+1} (Score)" for i in range(7)])
+        headers.extend([f"C2 M5 Q{i+1}" for i in range(13)])
+        headers.extend([f"C2 M6 Q{i+1}" for i in range(8)])
         headers.extend(["C3 Total Score", "C3 Level"])
         headers.extend([f"C3 M7 Q{i+1}" for i in range(18)])
         headers.extend([f"C3 M8 Q{i+1}" for i in range(6)])
         headers.extend([f"C3 M10 Q{i+1}" for i in range(9)])
-        
-        # C4 Headers
         headers.extend(["C4 Score (AI)", "C4 Level", "C4 Answers (Text)"])
         headers.append("Global Recommendation")
         
@@ -722,67 +689,39 @@ class QuizBot:
             c1_d = get_d(r, 'c1_details')
             c2_d = get_d(r, 'c2_details')
             c3_d = get_d(r, 'c3_details')
-            c4_d = get_d(r, 'c4_details') # List of [Q, A]
+            c4_d = get_d(r, 'c4_details')
             
-            # --- START ROW CONSTRUCTION ---
             data = [r['user_id'], r.get('fio', '')]
-            
-            # --- C1 DATA ---
             data.extend([r.get('c1_score'), r.get('c1_level')])
-            
-            # M1 (Set of selected IDs. Convert to 1/0 for each item 1..11)
             m1_sel = set(c1_d.get('m1', []))
             for i in range(1, 12):
                 data.append(self.content.M1_ITEMS.get(i, 0) if i in m1_sel else 0)
-            
-            # M2 (List of scores)
             m2_res = c1_d.get('m2', [])
             for i in range(18): data.append(m2_res[i] if i < len(m2_res) else 0)
-            
-            # M3 (Set of selected IDs)
             m3_sel = set(c1_d.get('m3', []))
             for i in range(1, 14):
                 data.append(self.content.M3_ITEMS.get(i, 0) if i in m3_sel else 0)
-            
-            # --- C2 DATA ---
             data.extend([r.get('c2_score'), r.get('c2_level')])
-            
-            # M4 (List of scores per question)
             m4_res = c2_d.get('m4', [])
             for i in range(7): data.append(m4_res[i] if i < len(m4_res) else 0)
-            
-            # M5 (Set of selected IDs)
             m5_sel = set(c2_d.get('m5', []))
             for i in range(1, 14):
                 data.append(self.content.M5_ITEMS.get(i, 0) if i in m5_sel else 0)
-
-            # M6 (List of scores)
             m6_res = c2_d.get('m6', [])
             for i in range(8): data.append(m6_res[i] if i < len(m6_res) else 0)
-            
-            # --- C3 DATA ---
             data.extend([r.get('c3_score'), r.get('c3_level')])
-            
-            # M7
             m7_res = c3_d.get('m7', [])
             for i in range(18): data.append(m7_res[i] if i < len(m7_res) else 0)
-            # M8
             m8_res = c3_d.get('m8', [])
             for i in range(6): data.append(m8_res[i] if i < len(m8_res) else 0)
-            # M10
             m10_res = c3_d.get('m10', [])
             for i in range(9): data.append(m10_res[i] if i < len(m10_res) else 0)
-            
-            # --- C4 DATA ---
             c4_text = " || ".join([f"{x[0]}: {x[1]}" for x in c4_d]) if isinstance(c4_d, list) else ""
             data.extend([r.get('c4_score'), r.get('c4_level'), c4_text])
-            
-            # Global
             data.append(r.get('total_res'))
-            
             ws.append(data)
             
-        # Save to buffer
+
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
@@ -794,9 +733,6 @@ class QuizBot:
             caption="📊 Полный отчет с ФИО и детальными баллами."
         )
 
-    # --- STANDARD HANDLERS (C1, C2, C3) ---
-    
-    # Intro handlers (показывают текст перед началом)
     def c1_intro(self, call):
         if self.db.get_results(call.message.chat.id).get('c1_res'): return self.bot.answer_callback_query(call.id, "Пройдено!")
         kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("Начать", callback_data="c1_real_start"))
@@ -812,31 +748,26 @@ class QuizBot:
         kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("Начать", callback_data="c3_real_start"))
         self._safe_edit(call.message.chat.id, call.message.message_id, self.content.CRITERIA_INTROS['c3'], reply_markup=kb)
 
-    # Real Start Handlers (старая логика запуска тестов)
     def c1_start_test(self, call):
-        # M1 Intro Text
-        self.bot.send_message(call.message.chat.id, self.content.METHODOLOGY_INSTRUCTIONS['m1'], parse_mode="HTML")
-        # Reset session
+        self.bot.send_message(call.message.chat.id, self.content.METHODOLOGY_INSTRUCTIONS['text_m1'], parse_mode="HTML")
         self._get_session(call.message.chat.id).c1_data = {
             'm1_answers': set(), 'm2_idx': 0, 'm2_answers': [], 'm3_answers': set()
         }
         self._render_checkbox_step(call.message.chat.id, call.message.message_id, "c1_m1", self.content.M1_TEXTS, set(), "М.1 Ценности", "c1_m1_done")
 
     def c2_start_test(self, call):
-        self._get_session(call.message.chat.id).c2_data = {'m4_idx': 0, 'm4_score': 0, 'm4_temp': set(), 'm4_answers': [], 'm5_answers': set(), 'm6_idx': 0, 'm6_answers': []}
-        # M4 Intro (It's integrated in the flow usually, but we can add text)
-        self.bot.send_message(call.message.chat.id, "<b>Методика 4.</b> (в коде C2M4)\nОтветьте на вопросы.", parse_mode="HTML")
+        self._get_session(call.message.chat.id).c2_data = {'m4_idx': 0, 'm4_score': 0, 'm4_temp': set(), 'm4_answers': [], 'm5_answers': set(), 'm6_idx': 0, 'm6_answers': [], 'm6_score': 0}
+        self.bot.send_message(call.message.chat.id, self.content.METHODOLOGY_INSTRUCTIONS['text_m5'], parse_mode="HTML")
         self._render_m4_step(call.message.chat.id, call.message.message_id)
 
     def c3_start_test(self, call):
         self._get_session(call.message.chat.id).c3_data = {'m7_idx': 0, 'm7_answers': [], 'm8_idx': 0, 'm8_answers': [], 'm10_idx': 0, 'm10_answers': []}
-        self.bot.send_message(call.message.chat.id, self.content.METHODOLOGY_INSTRUCTIONS['c2_intro_m7'], parse_mode="HTML") # M7 intro
-        self._render_sequence_step(call.message.chat.id, call.message.message_id, "c3_seq_m7", self.content.GENERIC_TESTS['m7'], 0, "М.7 Потенциал")
+        self.bot.send_message(call.message.chat.id, self.content.METHODOLOGY_INSTRUCTIONS['text_m8'], parse_mode="HTML") 
+        self._render_sequence_step(call.message.chat.id, call.message.message_id, "c3_seq_m7", self.content.GENERIC_TESTS['m7'], 0, "М.8 Потенциал")
 
-    # --- LOGIC HANDLERS (Same logic, slightly adjusted for intros) ---
     def c1_m1_handler(self, call):
         if call.data == "c1_m1_done": 
-            self.bot.send_message(call.message.chat.id, self.content.METHODOLOGY_INSTRUCTIONS['m2'], parse_mode="HTML")
+            self.bot.send_message(call.message.chat.id, self.content.METHODOLOGY_INSTRUCTIONS['text_m2'], parse_mode="HTML")
             self._render_sequence_step(call.message.chat.id, call.message.message_id, "c1_m2", self.content.M2_QS, 0, "М.2 Саморазвитие")
         else: self._handle_checkbox_toggle(call, "c1_m1", self.content.M1_TEXTS, self._get_session(call.message.chat.id).c1_data['m1_answers'], "М.1", "c1_m1_done")
     
@@ -848,7 +779,7 @@ class QuizBot:
             d['m2_idx'] += 1
             self._render_sequence_step(call.message.chat.id, call.message.message_id, "c1_m2", self.content.M2_QS, d['m2_idx'], "М.2", "c1_m3_start")
         elif "next" in call.data: 
-            self.bot.send_message(call.message.chat.id, self.content.METHODOLOGY_INSTRUCTIONS['m3'], parse_mode="HTML")
+            self.bot.send_message(call.message.chat.id, self.content.METHODOLOGY_INSTRUCTIONS['text_m3'], parse_mode="HTML")
             self._render_checkbox_step(call.message.chat.id, call.message.message_id, "c1_m3", self.content.M3_TEXTS, d['m3_answers'], "М.3", "c1_done")
     
     def c1_m3_handler(self, call): self._handle_checkbox_toggle(call, "c1_m3", self.content.M3_TEXTS, self._get_session(call.message.chat.id).c1_data['m3_answers'], "М.3", "c1_done")
@@ -860,7 +791,6 @@ class QuizBot:
         s3 = sum([self.content.M3_ITEMS[k] for k in d['m3_answers']])
         l1, l2, l3 = self._calc_level(s1, 3, 5), self._calc_level(s2, 27, 41), self._calc_level(s3, 2, 3)
         details = {'m1': list(d['m1_answers']), 'm2': d['m2_answers'], 'm3': list(d['m3_answers'])}
-        # Используем описания уровня из словаря (хотя можно и убрать)
         self._finalize(call.message.chat.id, call.message.message_id, 'c1', s1+s2+s3, [s1,s2,s3], [l1,l2,l3], ["М1","М2","М3"], details)
 
     def c2_m4_handler(self, call):
@@ -886,9 +816,9 @@ class QuizBot:
             
     def c2_m5_handler(self, call):
         if call.data == "c2_m5_done": 
-            self.bot.send_message(call.message.chat.id, self.content.METHODOLOGY_INSTRUCTIONS['c2_intro_m6'], parse_mode="HTML")
-            self._render_sequence_step(call.message.chat.id, call.message.message_id, "c2_m6", self.content.M6_QS, 0, "М.6")
-        else: self._handle_checkbox_toggle(call, "c2_m5", self.content.M5_TEXTS, self._get_session(call.message.chat.id).c2_data['m5_answers'], "М.5", "c2_m5_done")
+            self.bot.send_message(call.message.chat.id, self.content.METHODOLOGY_INSTRUCTIONS['text_m7'], parse_mode="HTML")
+            self._render_sequence_step(call.message.chat.id, call.message.message_id, "c2_m6", self.content.M6_QS, 0, "М.7")
+        else: self._handle_checkbox_toggle(call, "c2_m5", self.content.M5_TEXTS, self._get_session(call.message.chat.id).c2_data['m5_answers'], "М.6", "c2_m5_done")
         
     def c2_m6_handler(self, call):
         d = self._get_session(call.message.chat.id).c2_data
@@ -897,11 +827,11 @@ class QuizBot:
             d['m6_score'] += score
             d['m6_answers'].append(score)
             d['m6_idx'] += 1
-            self._render_sequence_step(call.message.chat.id, call.message.message_id, "c2_m6", self.content.M6_QS, d['m6_idx'], "М.6", "finish")
+            self._render_sequence_step(call.message.chat.id, call.message.message_id, "c2_m6", self.content.M6_QS, d['m6_idx'], "М.7", "finish")
         elif "next" in call.data:
             s4, s5, s6 = sum(d['m4_answers']), sum([self.content.M5_ITEMS[k] for k in d['m5_answers']]), sum(d['m6_answers'])
             details = {'m4': d['m4_answers'], 'm5': list(d['m5_answers']), 'm6': d['m6_answers']}
-            self._finalize(call.message.chat.id, call.message.message_id, 'c2', s4+s5+s6, [s4,s5,s6], [self._calc_level(s4,6,10), self._calc_level(s5,6,10), self._calc_level(s6,12,18)], ["М4","М5","М6"], details)
+            self._finalize(call.message.chat.id, call.message.message_id, 'c2', s4+s5+s6, [s4,s5,s6], [self._calc_level(s4,6,10), self._calc_level(s5,6,10), self._calc_level(s6,12,18)], ["М5","М6","М7"], details)
 
     def c3_seq_handler(self, call):
         d = self._get_session(call.message.chat.id).c3_data
@@ -911,19 +841,22 @@ class QuizBot:
             d[f'{test}_answers'].append(score)
             d[f'{test}_idx'] += 1
             qs = self.content.GENERIC_TESTS[test]
-            if d[f'{test}_idx'] < len(qs): self._render_sequence_step(call.message.chat.id, call.message.message_id, f"c3_seq_{test}", qs, d[f'{test}_idx'], test.upper())
+            if d[f'{test}_idx'] < len(qs): 
+                title_map = {'m7': "М.8", 'm8': "М.9", 'm10': "М.10"}
+                self._render_sequence_step(call.message.chat.id, call.message.message_id, f"c3_seq_{test}", qs, d[f'{test}_idx'], title_map.get(test, test.upper()))
             else:
                 nxt = "m8" if test=="m7" else ("m10" if test=="m8" else "finish")
                 if nxt == "finish":
                     s7, s8, s10 = sum(d['m7_answers']), sum(d['m8_answers']), sum(d['m10_answers'])
                     details = {'m7': d['m7_answers'], 'm8': d['m8_answers'], 'm10': d['m10_answers']}
-                    self._finalize(call.message.chat.id, call.message.message_id, 'c3', s7+s8+s10, [s7,s8,s10], [self._calc_level(s7,27,41), self._calc_level(s8,5,14), self._calc_level(s10,10,15)], ["М7","М8","М10"], details)
+                    self._finalize(call.message.chat.id, call.message.message_id, 'c3', s7+s8+s10, [s7,s8,s10], [self._calc_level(s7,27,41), self._calc_level(s8,5,14), self._calc_level(s10,10,15)], ["М8","М9","М10"], details)
                 else:
-                    intro_key = "c3_intro_" + nxt
+                    intro_key = 'text_m9' if nxt == 'm8' else 'text_m10'
+                    title_next = "М.9" if nxt == 'm8' else "М.10"
+                    
                     self.bot.send_message(call.message.chat.id, self.content.METHODOLOGY_INSTRUCTIONS.get(intro_key, ""), parse_mode="HTML")
-                    self._render_sequence_step(call.message.chat.id, call.message.message_id, f"c3_seq_{nxt}", self.content.GENERIC_TESTS[nxt], 0, nxt.upper())
+                    self._render_sequence_step(call.message.chat.id, call.message.message_id, f"c3_seq_{nxt}", self.content.GENERIC_TESTS[nxt], 0, title_next)
 
-    # --- RENDER HELPERS ---
     def _handle_checkbox_toggle(self, call, prefix, items, selected, title, done_cb):
         idx = int(call.data.split("_")[2])
         if idx in selected: selected.remove(idx)
@@ -943,7 +876,7 @@ class QuizBot:
 
     def _render_sequence_step(self, chat_id, msg_id, prefix, qs_list, idx, title, next_callback=None):
         if idx >= len(qs_list):
-            if next_callback == "finish": return
+            # if next_callback == "finish": return  <-- REMOVED THIS LINE
             kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("Далее", callback_data=f"{prefix}_next_callback"))
             self._safe_edit(chat_id, msg_id, "Раздел завершен.", reply_markup=kb)
             return
@@ -960,11 +893,11 @@ class QuizBot:
     def _render_m4_step(self, chat_id, msg_id):
         d = self._get_session(chat_id).c2_data
         if d['m4_idx'] >= len(self.content.M4_QS):
-            self.bot.send_message(chat_id, self.content.METHODOLOGY_INSTRUCTIONS['c2_intro_m5'], parse_mode="HTML")
-            self._render_checkbox_step(chat_id, msg_id, "c2_m5", self.content.M5_TEXTS, d['m5_answers'], "М.5", "c2_m5_done")
+            self.bot.send_message(chat_id, self.content.METHODOLOGY_INSTRUCTIONS['text_m6'], parse_mode="HTML")
+            self._render_checkbox_step(chat_id, msg_id, "c2_m5", self.content.M5_TEXTS, d['m5_answers'], "М.6", "c2_m5_done")
             return
         q = self.content.M4_QS[d['m4_idx']]
-        msg = f"<b>М.4 ({d['m4_idx']+1})</b>\n{q['q']}\n"
+        msg = f"<b>М.5 ({d['m4_idx']+1})</b>\n{q['q']}\n"
         kb = types.InlineKeyboardMarkup(row_width=5)
         btns = []
         if q['t'] == 's':
@@ -984,9 +917,14 @@ class QuizBot:
     def _finalize(self, chat_id, msg_id, key, total, scores, levels, labels, details=None):
         avg = sum(levels)/len(levels)
         fl = 1 if avg < 1.6 else (2 if avg < 2.4 else 3)
+        
         txt = f"📊 <b>{key.upper()}</b>\n"
         for i, l in enumerate(labels): txt += f"{l}: {scores[i]} ({levels[i]})\n"
-        txt += f"\nИтог: {self.content.LEVEL_NAMES[fl]}"
+        
+        level_name = self.content.LEVEL_NAMES[fl]
+        full_description = self.content.FULL_DESCRIPTIONS[key][fl]
+        
+        txt += f"\nИтог: <b>{level_name}</b>\n\n{full_description}"
         
         self.db.save_result(chat_id, key, txt, total, fl, details=details)
         kb = types.InlineKeyboardMarkup().add(types.InlineKeyboardButton("Меню", callback_data="menu"))
