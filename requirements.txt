@@ -1,4 +1,6 @@
-pyTelegramBotAPI
-requests
-python-dotenv
+aiogram
+aiohttp
+aiosqlite
 openpyxl
+python-dotenv
+cryptography
